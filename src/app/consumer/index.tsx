@@ -1,0 +1,781 @@
+import { Colors } from "@/constants/color";
+import { Ionicons } from "@expo/vector-icons";
+import { useRouter } from "expo-router";
+import * as SecureStore from "expo-secure-store";
+import { useEffect, useRef, useState, type ComponentRef } from "react";
+import {
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { api } from "../../../services/api";
+import {
+  ForgotPasswordEmailModal,
+  ReserveAlertModal,
+  ReserveModalState,
+} from "../components/CebuRegistrationHelpers";
+
+const saveStorageItem = async (key: string, value: string) => {
+  if (Platform.OS === "web") {
+    localStorage.setItem(key, value);
+  } else {
+    await SecureStore.setItemAsync(key, value);
+  }
+};
+
+export default function LoginScreen() {
+  const router = useRouter();
+  const { width, height } = useWindowDimensions();
+
+  const scrollViewRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  const passwordInputRef = useRef<ComponentRef<typeof TextInput>>(null);
+
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [forgotModalVisible, setForgotModalVisible] = useState(false);
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [focusedField, setFocusedField] = useState<"email" | "password" | null>(
+    null
+  );
+
+  const [modalAlert, setModalAlert] = useState<ReserveModalState>({
+    visible: false,
+    title: "",
+    message: "",
+    type: "info",
+  });
+
+  const showModal = (
+    title: string,
+    message: string,
+    type: "success" | "error" | "info" | "warning" = "info"
+  ) => {
+    setModalAlert({ visible: true, title, message, type });
+  };
+
+  const scrollToActiveInput = (field: "email" | "password") => {
+    const targetY = field === "password" ? 130 : 70;
+    setTimeout(() => {
+      scrollViewRef.current?.scrollTo({ y: targetY, animated: true });
+    }, Platform.OS === "ios" ? 80 : 140);
+  };
+
+  useEffect(() => {
+    const showEvent =
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent =
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      setIsKeyboardOpen(true);
+      setKeyboardHeight(e.endCoordinates?.height || 260);
+    });
+
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setIsKeyboardOpen(false);
+      setKeyboardHeight(0);
+      setFocusedField(null);
+      scrollViewRef.current?.scrollTo({ y: 0, animated: true });
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  const isVeryShortPhone = height < 620;
+  const isShortPhone = height < 700;
+  const isNarrowPhone = width < 360;
+
+  const horizontalPadding = isNarrowPhone ? 16 : width < 400 ? 20 : 28;
+
+  const handleLogin = async () => {
+    Keyboard.dismiss();
+    if (!email.trim() || !password) {
+      showModal(
+        "Credentials Required",
+        "Please enter both your email address and password.",
+        "warning"
+      );
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const response = await api.post("accounts/login/", {
+        user_email: email.trim(),
+        user_pass: password,
+      });
+
+      const {
+        access,
+        refresh,
+        role,
+        email: returnedEmail,
+        profile_id,
+        entity_name,
+        merch_type,
+        account_status,
+        status_reason,
+        expiry_date,
+      } = response.data;
+
+      if (!profile_id) {
+        showModal(
+          "Account Profile Missing",
+          "Could not load the profile record for this account. Please contact ReServe Admin.",
+          "error"
+        );
+        return;
+      }
+
+      if (account_status === "Inactive" || account_status === "Deleted") {
+        showModal(
+          "Account Deactivated",
+          "This account has been deactivated/deleted. Please contact ReServe Admin if you wish to restore your account.",
+          "error"
+        );
+        return;
+      }
+
+      if (account_status === "Suspended") {
+        showModal(
+          "Account Suspended",
+          `Reason: ${
+            status_reason || "Policy Violation"
+          }\n\nPlease check your email for the official appeal link to reactivate your account.`,
+          "error"
+        );
+        return;
+      }
+
+      await saveStorageItem("access", access || "");
+      await saveStorageItem("refresh", refresh || "");
+      await saveStorageItem("user_role", role || "");
+      await saveStorageItem("user_email", returnedEmail || email.trim());
+      await saveStorageItem("profile_id", String(profile_id));
+      await saveStorageItem("entity_name", entity_name || "");
+      await saveStorageItem("merch_type", merch_type || "Bakeshop");
+      await saveStorageItem("account_status", account_status || "Active");
+      await saveStorageItem("status_reason", status_reason || "");
+      await saveStorageItem("expiry_date", expiry_date || "");
+
+      if (
+        (role === "Merchant" || role === "FoodBank") &&
+        (account_status === "Resubmit Required" ||
+          account_status === "Renewal Required")
+      ) {
+        router.replace({
+          pathname: "/establishment/resubmit-permit" as any,
+          params: {
+            id: String(profile_id),
+            role: role,
+            name: entity_name,
+            status: account_status,
+            reason: status_reason,
+            expiry: expiry_date,
+          },
+        });
+        return;
+      }
+
+      if (
+        (role === "Merchant" || role === "FoodBank") &&
+        account_status === "Pending"
+      ) {
+        showModal(
+          "Application Under Review",
+          "Your application is currently under review by the ReServe Admin team. You will receive an email once verified!",
+          "info"
+        );
+        return;
+      }
+
+      if (role === "Consumer") {
+        router.replace("/consumer/homepage");
+      } else if (role === "Merchant") {
+        if ((merch_type || "").toLowerCase().includes("market")) {
+          router.replace("/establishment/market_listing" as any);
+        } else {
+          router.replace("/establishment/dashboard");
+        }
+      } else {
+        router.replace("/foodbank/dashboard");
+      }
+    } catch (error) {
+      const err = error as any;
+      if (!err.response) {
+        showModal(
+          "Network Connection Error",
+          `Cannot reach ${api.defaults.baseURL} from your device. Make sure Django is running with "python manage.py runserver 0.0.0.0:8000" and both devices are on the same Wi-Fi.`,
+          "error"
+        );
+      } else {
+        const errorMessage =
+          err.response?.data?.error ||
+          err.response?.data?.non_field_errors?.[0] ||
+          "Failed to log in. Please check your credentials.";
+        showModal("Login Failed", errorMessage, "error");
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <SafeAreaView
+      style={styles.container}
+      edges={["top", "left", "right", "bottom"]}
+    >
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? 16 : 0}
+      >
+        <View
+          style={{
+            paddingHorizontal: horizontalPadding,
+            paddingTop: isKeyboardOpen ? 2 : 6,
+          }}
+        >
+          <TouchableOpacity
+            style={styles.backButton}
+            activeOpacity={0.7}
+            onPress={() => router.replace("/")}
+          >
+            <Ionicons
+              name="arrow-back"
+              size={isVeryShortPhone ? 20 : 22}
+              color={Colors.primary2}
+            />
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView
+          ref={scrollViewRef}
+          contentContainerStyle={[
+            styles.content,
+            {
+              paddingHorizontal: horizontalPadding,
+              justifyContent: isKeyboardOpen ? "flex-start" : "center",
+              paddingTop: isKeyboardOpen ? 4 : 16,
+              paddingBottom: isKeyboardOpen
+                ? Platform.OS === "android"
+                  ? Math.max(140, keyboardHeight * 0.65)
+                  : 90
+                : 20,
+            },
+          ]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <View
+            style={[
+              styles.logoContainer,
+              {
+                marginBottom: isKeyboardOpen
+                  ? 6
+                  : isVeryShortPhone
+                  ? 12
+                  : isShortPhone
+                  ? 16
+                  : 22,
+              },
+            ]}
+          >
+            <Text
+              style={[
+                styles.logo,
+                {
+                  fontSize: isKeyboardOpen
+                    ? 22
+                    : isNarrowPhone
+                    ? 32
+                    : width < 400
+                    ? 36
+                    : 42,
+                },
+              ]}
+            >
+              RESERVE
+            </Text>
+
+            {!isKeyboardOpen && (
+              <>
+                <View
+                  style={[
+                    styles.logoAccent,
+                    {
+                      marginTop: isVeryShortPhone ? 3 : 5,
+                      marginBottom: isVeryShortPhone ? 3 : 5,
+                    },
+                  ]}
+                />
+
+                <Text
+                  style={[
+                    styles.logoSubtitle,
+                    {
+                      fontSize: isVeryShortPhone ? 9 : 10,
+                    },
+                  ]}
+                >
+                  Food rescue made simple
+                </Text>
+              </>
+            )}
+          </View>
+
+          <View
+            style={[
+              styles.card,
+              {
+                paddingHorizontal: isNarrowPhone ? 18 : width < 400 ? 22 : 28,
+                paddingVertical: isKeyboardOpen
+                  ? 16
+                  : isVeryShortPhone
+                  ? 18
+                  : isShortPhone
+                  ? 22
+                  : 28,
+              },
+            ]}
+          >
+            <View
+              style={[
+                styles.titleContainer,
+                {
+                  marginBottom: isKeyboardOpen
+                    ? 12
+                    : isVeryShortPhone
+                    ? 15
+                    : isShortPhone
+                    ? 18
+                    : 22,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.title,
+                  { fontSize: isKeyboardOpen ? 19 : isVeryShortPhone ? 21 : 24 },
+                ]}
+              >
+                LOG IN
+              </Text>
+              <Text
+                style={[
+                  styles.subtitle,
+                  { fontSize: isVeryShortPhone ? 10 : 11 },
+                ]}
+              >
+                Access your RESERVE account
+              </Text>
+            </View>
+
+            <View
+              style={[
+                styles.fieldContainer,
+                {
+                  marginBottom: isVeryShortPhone
+                    ? 10
+                    : isShortPhone
+                    ? 13
+                    : 16,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.label,
+                  { fontSize: isVeryShortPhone ? 11 : 12 },
+                ]}
+              >
+                Email Address
+              </Text>
+
+              <View
+                style={[
+                  styles.inputWrapper,
+                  focusedField === "email" && styles.inputWrapperFocused,
+                  {
+                    height: isVeryShortPhone ? 46 : isShortPhone ? 48 : 50,
+                  },
+                ]}
+              >
+                <Ionicons
+                  name="mail-outline"
+                  size={isVeryShortPhone ? 18 : 20}
+                  color={
+                    focusedField === "email" ? Colors.primary : Colors.icon
+                  }
+                  style={styles.inputIcon}
+                />
+
+                <TextInput
+                  style={[
+                    styles.input,
+                    { fontSize: isVeryShortPhone ? 12 : 13 },
+                  ]}
+                  placeholder="user@email.com"
+                  placeholderTextColor={Colors.placeholder}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="next"
+                  onSubmitEditing={() =>
+                    (passwordInputRef.current as { focus: () => void } | null)?.focus()
+                  }
+                  onFocus={() => {
+                    setFocusedField("email");
+                    scrollToActiveInput("email");
+                  }}
+                  onBlur={() => {
+                    if (focusedField === "email") setFocusedField(null);
+                  }}
+                  textContentType="emailAddress"
+                  value={email}
+                  onChangeText={setEmail}
+                />
+              </View>
+            </View>
+
+            <View
+              style={[
+                styles.fieldContainer,
+                {
+                  marginBottom: isVeryShortPhone
+                    ? 14
+                    : isShortPhone
+                    ? 16
+                    : 20,
+                },
+              ]}
+            >
+              <View style={styles.passwordLabelRow}>
+                <Text
+                  style={[
+                    styles.label,
+                    {
+                      fontSize: isVeryShortPhone ? 11 : 12,
+                      marginBottom: 0,
+                    },
+                  ]}
+                >
+                  Password
+                </Text>
+
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    Keyboard.dismiss();
+                    setForgotModalVisible(true);
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.forgotText,
+                      {
+                        fontSize: isVeryShortPhone ? 9 : 10,
+                        marginBottom: 0,
+                      },
+                    ]}
+                  >
+                    Forgot Password?
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <View
+                style={[
+                  styles.inputWrapper,
+                  focusedField === "password" && styles.inputWrapperFocused,
+                  {
+                    height: isVeryShortPhone ? 46 : isShortPhone ? 48 : 50,
+                  },
+                ]}
+              >
+                <Ionicons
+                  name="lock-closed-outline"
+                  size={isVeryShortPhone ? 18 : 20}
+                  color={
+                    focusedField === "password" ? Colors.primary : Colors.icon
+                  }
+                  style={styles.inputIcon}
+                />
+
+                <TextInput
+                  ref={passwordInputRef}
+                  style={[
+                    styles.input,
+                    { fontSize: isVeryShortPhone ? 12 : 13 },
+                  ]}
+                  placeholder="Enter your password"
+                  placeholderTextColor={Colors.placeholder}
+                  secureTextEntry={!showPassword}
+                  autoCapitalize="none"
+                  returnKeyType="done"
+                  onSubmitEditing={handleLogin}
+                  onFocus={() => {
+                    setFocusedField("password");
+                    scrollToActiveInput("password");
+                  }}
+                  onBlur={() => {
+                    if (focusedField === "password") setFocusedField(null);
+                  }}
+                  textContentType="password"
+                  numberOfLines={1}
+                  value={password}
+                  onChangeText={setPassword}
+                />
+
+                <TouchableOpacity
+                  style={styles.eyeButton}
+                  activeOpacity={0.7}
+                  onPress={() => setShowPassword(!showPassword)}
+                >
+                  <Ionicons
+                    name={showPassword ? "eye-off-outline" : "eye-outline"}
+                    size={isVeryShortPhone ? 18 : 20}
+                    color={Colors.icon}
+                  />
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            <TouchableOpacity
+              style={[
+                styles.loginButton,
+                { height: isVeryShortPhone ? 44 : 47 },
+              ]}
+              activeOpacity={0.8}
+              onPress={handleLogin}
+              disabled={isLoading}
+            >
+              <Text
+                style={[
+                  styles.loginButtonText,
+                  { fontSize: isVeryShortPhone ? 12 : 13 },
+                ]}
+              >
+                {isLoading ? "LOGGING IN..." : "LOG IN"}
+              </Text>
+              <Ionicons
+                name="arrow-forward"
+                size={isVeryShortPhone ? 16 : 18}
+                color={Colors.white}
+              />
+            </TouchableOpacity>
+
+            <View
+              style={[
+                styles.signupContainer,
+                {
+                  marginTop: isKeyboardOpen
+                    ? 12
+                    : isVeryShortPhone
+                    ? 16
+                    : isShortPhone
+                    ? 18
+                    : 22,
+                },
+              ]}
+            >
+              <Text
+                style={[
+                  styles.signupText,
+                  { fontSize: isVeryShortPhone ? 10 : 11 },
+                ]}
+              >
+                Don&apos;t have an account?
+              </Text>
+
+              <TouchableOpacity
+                activeOpacity={0.7}
+                onPress={() => router.push("/consumer/account-type")}
+              >
+                <Text
+                  style={[
+                    styles.signupLink,
+                    { fontSize: isVeryShortPhone ? 10 : 11 },
+                  ]}
+                >
+                  {" "}
+                  Sign up
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {!isShortPhone && !isKeyboardOpen && (
+            <Text style={styles.bottomText}>
+              Save food. Support communities.
+            </Text>
+          )}
+        </ScrollView>
+
+        <ForgotPasswordEmailModal
+          visible={forgotModalVisible}
+          initialEmail={email}
+          onClose={() => setForgotModalVisible(false)}
+        />
+
+        <ReserveAlertModal
+          visible={modalAlert.visible}
+          title={modalAlert.title}
+          message={modalAlert.message}
+          type={modalAlert.type}
+          onClose={() => setModalAlert((prev) => ({ ...prev, visible: false }))}
+        />
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: Colors.background },
+  content: { flexGrow: 1, alignItems: "center", justifyContent: "center" },
+  backButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: Colors.white,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  logoContainer: { alignItems: "center" },
+  logo: {
+    fontFamily: "PoppinsBold",
+    color: Colors.primary2,
+    letterSpacing: 2,
+    textAlign: "center",
+  },
+  logoAccent: {
+    width: 34,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: Colors.accent,
+  },
+  logoSubtitle: {
+    fontFamily: "PoppinsRegular",
+    color: Colors.primary1,
+    letterSpacing: 0.2,
+  },
+  card: {
+    width: "100%",
+    maxWidth: 420,
+    backgroundColor: Colors.white,
+    borderRadius: 20,
+    shadowColor: "#12372C",
+    shadowOffset: { width: 0, height: 7 },
+    shadowOpacity: 0.1,
+    shadowRadius: 18,
+    elevation: 5,
+  },
+  titleContainer: { alignItems: "center" },
+  title: {
+    fontFamily: "PoppinsBold",
+    color: Colors.primary2,
+    letterSpacing: 0.4,
+  },
+  subtitle: {
+    fontFamily: "PoppinsRegular",
+    color: Colors.primary1,
+    marginTop: 3,
+  },
+  fieldContainer: { width: "100%" },
+  label: {
+    fontFamily: "PoppinsSemiBold",
+    color: Colors.primary2,
+    marginBottom: 7,
+  },
+  passwordLabelRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 7,
+  },
+  forgotText: { fontFamily: "PoppinsMedium", color: Colors.primary },
+  inputWrapper: {
+    width: "100%",
+    backgroundColor: Colors.input,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  inputWrapperFocused: {
+    borderColor: Colors.primary,
+    backgroundColor: Colors.white,
+  },
+  inputIcon: { marginLeft: 14, marginRight: 8 },
+  input: {
+    flex: 1,
+    height: "100%",
+    paddingHorizontal: 0,
+    paddingVertical: Platform.OS === "ios" ? 10 : 6,
+    fontFamily: "PoppinsRegular",
+    color: Colors.primary2,
+    textAlignVertical: "center",
+    includeFontPadding: false,
+  },
+  eyeButton: {
+    paddingHorizontal: 14,
+    height: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  loginButton: {
+    width: "100%",
+    backgroundColor: Colors.primary,
+    borderRadius: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    shadowColor: Colors.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 7,
+    elevation: 3,
+  },
+  loginButtonText: {
+    fontFamily: "PoppinsSemiBold",
+    color: Colors.white,
+    letterSpacing: 0.3,
+  },
+  signupContainer: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  signupText: { fontFamily: "PoppinsRegular", color: Colors.primary1 },
+  signupLink: {
+    fontFamily: "PoppinsSemiBold",
+    color: Colors.primary,
+    marginLeft: 2,
+  },
+  bottomText: {
+    fontFamily: "PoppinsRegular",
+    fontSize: 9,
+    color: Colors.primary1,
+    marginTop: 14,
+    marginBottom: 6,
+    letterSpacing: 0.2,
+  },
+});
